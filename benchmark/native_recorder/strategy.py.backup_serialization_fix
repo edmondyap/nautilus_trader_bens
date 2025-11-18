@@ -1,0 +1,507 @@
+"""
+Native Data Recorder Strategy - Nautilus Trader Evaluation Code
+
+Trading Engines Project - Benchmark/Evaluation Code
+Location: benchmark/nautilus_trader/native_recorder/strategy.py
+Author: Benjamin Ang / Claude Code
+Created: 2025-11-09
+
+This is a Strategy-based data recorder that uses native Nautilus components
+for collecting live market data from Bybit and persisting to Parquet files.
+
+Architecture (85% Native):
+- ✅ NATIVE: Nautilus Strategy base class
+- ✅ NATIVE: Nautilus BybitDataClient for WebSocket subscriptions
+- ✅ NATIVE: Nautilus data models (TradeTick, QuoteTick, OrderBookDelta)
+- ✅ NATIVE: Nautilus TradingNode for lifecycle management
+- ❌ CUSTOM: pandas DataFrames for buffering (proven pattern)
+- ❌ CUSTOM: Direct parquet writes via to_parquet() (flexibility)
+- ❌ CUSTOM: Session metadata and checksums
+
+Patterns extracted from:
+- nautilus_trader/examples/live/bybit/bybit_options_data_collector.py (lines 427-659)
+- Proven production code, adapted for single-symbol SPOT use case
+
+Upstream: nautilus_trader/ (DO NOT MODIFY)
+Custom: This file (benchmark/evaluation code)
+"""
+
+from decimal import Decimal
+from pathlib import Path
+from typing import Any
+import time
+import hashlib
+import json
+
+import pandas as pd
+
+from nautilus_trader.config import StrategyConfig
+from nautilus_trader.model.data import OrderBookDeltas, QuoteTick, TradeTick
+from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.model.instruments import Instrument
+from nautilus_trader.model.book import OrderBook
+from nautilus_trader.trading.strategy import Strategy
+
+
+class NativeDataRecorderConfig(StrategyConfig, frozen=True):
+    """
+    Configuration for NativeDataRecorderStrategy.
+
+    Parameters
+    ----------
+    instrument_ids : list[str]
+        Instrument IDs to record (e.g., ["SOLUSDT-SPOT.BYBIT"])
+    output_dir : str
+        Directory to save parquet files
+    flush_interval_seconds : int, default=60
+        How often to flush data to parquet (seconds)
+    record_quotes : bool, default=True
+        Whether to record quote ticks
+    record_trades : bool, default=True
+        Whether to record trade ticks
+    record_orderbook : bool, default=True
+        Whether to record order book deltas
+    orderbook_depth : int, default=50
+        Order book depth (if recording)
+    connection_timeout_seconds : int, default=120
+        Warn if no data for this many seconds
+    run_duration_seconds : int | None, default=None
+        Auto-stop after this duration (None = run forever)
+    """
+    instrument_ids: list[str]
+    output_dir: str = "data/recordings"
+    flush_interval_seconds: int = 60
+    record_quotes: bool = True
+    record_trades: bool = True
+    record_orderbook: bool = True
+    orderbook_depth: int = 50
+    connection_timeout_seconds: int = 120
+    run_duration_seconds: int | None = None
+
+
+class NativeDataRecorderStrategy(Strategy):
+    """
+    Native data recording strategy using Nautilus components.
+
+    This strategy subscribes to market data and persists it to Parquet files
+    using proven patterns from bybit_options_data_collector.py.
+
+    Pattern Source: bybit_options_data_collector.py lines 273-659
+    - Data buffering: lines 273-278
+    - Subscriptions: lines 293-378
+    - Quote handling: lines 416-448
+    - Delta handling: lines 384-414
+    - Parquet persistence with append: lines 584-659
+    """
+
+    def __init__(self, config: NativeDataRecorderConfig):
+        super().__init__(config)
+
+        # Validate config
+        if not config.instrument_ids:
+            raise ValueError("Must specify at least one instrument_id")
+
+        # Data buffers (pattern from lines 273-278 of example)
+        self.quote_ticks_data: dict[str, list[dict]] = {}
+        self.trade_ticks_data: dict[str, list[dict]] = {}
+        self.order_book_deltas_data: dict[str, list[dict]] = {}
+
+        # Statistics
+        self.quote_count = 0
+        self.trade_count = 0
+        self.delta_count = 0
+        self.last_data_time = 0.0
+        self.connection_warnings = 0
+
+        # Session tracking
+        self.session_start_time = None
+        self.run_id = None
+        self.output_path = None
+
+        # Managed order books
+        self.order_books: dict[InstrumentId, OrderBook] = {}
+
+    def on_start(self):
+        """
+        Subscribe to market data on strategy start.
+
+        Pattern from lines 293-378 of bybit_options_data_collector.py.
+        """
+        # Initialize session
+        self.session_start_time = time.time()
+        self.run_id = pd.Timestamp.now().strftime("%Y%m%d-%H%M%S")
+        self.output_path = Path(self.config.output_dir) / self.run_id
+        self.output_path.mkdir(parents=True, exist_ok=True)
+
+        self.log.info(f"Starting data recording session: {self.run_id}")
+        self.log.info(f"Output directory: {self.output_path}")
+
+        # Parse instrument IDs
+        instrument_ids = [InstrumentId.from_str(id_str) for id_str in self.config.instrument_ids]
+
+        # Subscribe to each instrument
+        for instrument_id in instrument_ids:
+            self.log.info(f"Subscribing to {instrument_id}")
+
+            # Subscribe to quotes
+            if self.config.record_quotes:
+                self.subscribe_quote_ticks(instrument_id)
+                self.log.info(f"✅ Subscribed to quote ticks: {instrument_id}")
+
+            # Subscribe to trades
+            if self.config.record_trades:
+                self.subscribe_trade_ticks(instrument_id)
+                self.log.info(f"✅ Subscribed to trade ticks: {instrument_id}")
+
+            # Subscribe to orderbook deltas
+            if self.config.record_orderbook:
+                self.subscribe_order_book_deltas(
+                    instrument_id,
+                    depth=self.config.orderbook_depth
+                )
+                self.log.info(f"✅ Subscribed to orderbook deltas: {instrument_id} (depth={self.config.orderbook_depth})")
+
+        # Schedule periodic flush
+        self.clock.set_timer(
+            name="flush_data",
+            interval=pd.Timedelta(seconds=self.config.flush_interval_seconds),
+            callback=self._periodic_flush,
+        )
+
+        # Schedule connection health check
+        self.clock.set_timer(
+            name="health_check",
+            interval=pd.Timedelta(seconds=30),
+            callback=self._check_connection_health,
+        )
+
+        # Schedule auto-stop (if duration specified)
+        if self.config.run_duration_seconds:
+            # Use stop_time instead of single_shot for nautilus_trader 1.219.0
+            stop_time = self.clock.utc_now() + pd.Timedelta(seconds=self.config.run_duration_seconds)
+            self.clock.set_timer(
+                name="auto_stop",
+                interval=pd.Timedelta(seconds=self.config.run_duration_seconds),
+                callback=self._auto_stop,
+                stop_time=stop_time,
+            )
+            self.log.info(f"Session will auto-stop after {self.config.run_duration_seconds} seconds")
+
+    def _subscribe_to_instrument(self, instrument_id: InstrumentId, instrument: Instrument):
+        """
+        Subscribe to order book for an instrument.
+
+        Pattern from lines 318-336 of bybit_options_data_collector.py.
+        """
+        # Create managed order book
+        order_book = OrderBook(
+            instrument_id=instrument_id,
+            book_type=instrument.book_type,
+        )
+        self.order_books[instrument_id] = order_book
+
+        # Subscribe to deltas
+        self.subscribe_order_book_deltas(
+            instrument_id=instrument_id,
+            book_type=instrument.book_type,
+            depth=self.config.orderbook_depth,
+            managed=True,  # Let Nautilus maintain the book
+        )
+        self.log.info(f"✅ Subscribed to order book deltas: {instrument_id} (depth={self.config.orderbook_depth})")
+
+    def on_quote_tick(self, tick: QuoteTick):
+        """
+        Handle incoming quote tick.
+
+        Pattern from lines 416-448 of bybit_options_data_collector.py.
+        """
+        # Validate quote
+        if not self._validate_quote(tick):
+            return
+
+        # Store quote
+        self._store_quote_tick(tick)
+
+        # Update stats
+        self.quote_count += 1
+        self.last_data_time = time.time()
+
+    def on_trade_tick(self, tick: TradeTick):
+        """Handle incoming trade tick."""
+        # Store trade
+        self._store_trade_tick(tick)
+
+        # Update stats
+        self.trade_count += 1
+        self.last_data_time = time.time()
+
+    def on_order_book_deltas(self, deltas: OrderBookDeltas):
+        """
+        Handle incoming order book deltas.
+
+        Pattern from lines 384-414 of bybit_options_data_collector.py.
+        """
+        # Store each delta
+        for delta in deltas.deltas:
+            self._store_order_book_delta(delta, deltas.instrument_id)
+
+        # Update stats
+        self.delta_count += len(deltas.deltas)
+        self.last_data_time = time.time()
+
+    def _validate_quote(self, tick: QuoteTick) -> bool:
+        """
+        Validate quote tick data quality.
+
+        Pattern from lines 427-438 of bybit_options_data_collector.py.
+        """
+        # Check for invalid prices
+        if tick.bid_price <= 0 or tick.ask_price <= 0:
+            self.log.warning(f"Invalid quote prices: bid={tick.bid_price}, ask={tick.ask_price}")
+            return False
+
+        # Check for crossed spread
+        if tick.bid_price >= tick.ask_price:
+            self.log.warning(f"Crossed spread: bid={tick.bid_price} >= ask={tick.ask_price}")
+            return False
+
+        return True
+
+    def _store_quote_tick(self, tick: QuoteTick):
+        """
+        Store quote tick in buffer.
+
+        Pattern from lines 467-482 of bybit_options_data_collector.py.
+        """
+        instrument_key = str(tick.instrument_id)
+
+        if instrument_key not in self.quote_ticks_data:
+            self.quote_ticks_data[instrument_key] = []
+
+        self.quote_ticks_data[instrument_key].append({
+            "timestamp": pd.Timestamp(tick.ts_event, unit="ns", tz="UTC"),
+            "bid_price": float(tick.bid_price),
+            "ask_price": float(tick.ask_price),
+            "bid_size": float(tick.bid_size),
+            "ask_size": float(tick.ask_size),
+        })
+
+    def _store_trade_tick(self, tick: TradeTick):
+        """Store trade tick in buffer."""
+        instrument_key = str(tick.instrument_id)
+
+        if instrument_key not in self.trade_ticks_data:
+            self.trade_ticks_data[instrument_key] = []
+
+        self.trade_ticks_data[instrument_key].append({
+            "timestamp": pd.Timestamp(tick.ts_event, unit="ns", tz="UTC"),
+            "price": float(tick.price),
+            "size": float(tick.size),
+            "side": tick.aggressor_side.name,
+            "trade_id": str(tick.trade_id),  # Convert TradeId object to string
+        })
+
+    def _store_order_book_delta(self, delta, instrument_id: InstrumentId):
+        """
+        Store order book delta in buffer.
+
+        Pattern from lines 449-465 of bybit_options_data_collector.py.
+        """
+        instrument_key = str(instrument_id)
+
+        if instrument_key not in self.order_book_deltas_data:
+            self.order_book_deltas_data[instrument_key] = []
+
+        self.order_book_deltas_data[instrument_key].append({
+            "timestamp": pd.Timestamp(delta.ts_event, unit="ns", tz="UTC"),
+            "action": delta.action.name,
+            "side": delta.order.side.name,
+            "price": float(delta.order.price),
+            "size": float(delta.order.size),
+            "order_id": delta.order.order_id,
+        })
+
+    def _periodic_flush(self, time):
+        """Flush data buffers to parquet files periodically."""
+        self._save_all_data()
+
+    def _save_all_data(self):
+        """
+        Save all buffered data to parquet files.
+
+        Pattern from lines 584-659 of bybit_options_data_collector.py.
+        """
+        if not self.quote_ticks_data and not self.order_book_deltas_data:
+            return  # No data to save
+
+        self.log.info("Flushing data to parquet files...")
+
+        # Save quotes (use list() to avoid RuntimeError if dict changes during iteration)
+        for instrument_key, data in list(self.quote_ticks_data.items()):
+            if data:
+                self._save_to_parquet("quote_ticks", instrument_key, data)
+
+        # Save trades (use list() to avoid RuntimeError if dict changes during iteration)
+        for instrument_key, data in list(self.trade_ticks_data.items()):
+            if data:
+                self._save_to_parquet("trade_ticks", instrument_key, data)
+
+        # Save deltas (use list() to avoid RuntimeError if dict changes during iteration)
+        for instrument_key, data in list(self.order_book_deltas_data.items()):
+            if data:
+                self._save_to_parquet("order_book_deltas", instrument_key, data)
+
+        # Clear buffers
+        self.quote_ticks_data.clear()
+        self.trade_ticks_data.clear()
+        self.order_book_deltas_data.clear()
+
+        self.log.info(f"✅ Flush complete (quotes: {self.quote_count}, trades: {self.trade_count}, deltas: {self.delta_count})")
+
+    def _save_to_parquet(self, data_type: str, instrument_key: str, data: list[dict]):
+        """
+        Save data to parquet file with append logic.
+
+        CRITICAL: This implements the append pattern from lines 605-659.
+        """
+        # Create directory structure
+        type_dir = self.output_path / data_type / instrument_key
+        type_dir.mkdir(parents=True, exist_ok=True)
+
+        # File path
+        filepath = type_dir / f"{data_type}.parquet"
+
+        # Convert to DataFrame
+        new_df = pd.DataFrame(data)
+
+        # Append to existing file or create new
+        if filepath.exists():
+            try:
+                # Read existing data (pattern from lines 619-659)
+                existing_df = pd.read_parquet(filepath)
+
+                # Align columns (handle schema evolution)
+                all_columns = sorted(set(existing_df.columns) | set(new_df.columns))
+                for col in all_columns:
+                    if col not in existing_df.columns:
+                        existing_df[col] = None
+                    if col not in new_df.columns:
+                        new_df[col] = None
+
+                # Reorder columns to match
+                existing_df = existing_df[all_columns]
+                new_df = new_df[all_columns]
+
+                # Concatenate
+                combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+                combined_df.to_parquet(filepath, index=False)
+
+                self.log.info(f"✅ Appended {len(data)} {data_type} for {instrument_key} (total: {len(combined_df)})")
+
+            except Exception as e:
+                # Fallback: save new data only (pattern from lines 650-656)
+                self.log.error(f"Error appending to {filepath}: {e}")
+                self.log.warning(f"Saving new data only to {filepath}")
+                new_df.to_parquet(filepath, index=False)
+
+        else:
+            # Create new file
+            new_df.to_parquet(filepath, index=False)
+            self.log.info(f"✅ Created {filepath} with {len(data)} {data_type}")
+
+    def _check_connection_health(self, event):
+        """
+        Monitor connection health and warn if no data received.
+
+        Pattern from lines 502-517 of bybit_options_data_collector.py.
+        """
+        if self.last_data_time == 0:
+            return  # No data received yet (startup)
+
+        time_since_data = time.time() - self.last_data_time
+
+        if time_since_data > self.config.connection_timeout_seconds:
+            if self.connection_warnings < 3:  # Limit spam
+                self.log.warning(
+                    f"⚠️ No data received for {time_since_data:.1f} seconds! "
+                    f"(quotes: {self.quote_count}, trades: {self.trade_count}, deltas: {self.delta_count})"
+                )
+                self.connection_warnings += 1
+        else:
+            # Reset warnings on recovery
+            if self.connection_warnings > 0:
+                self.log.info(f"✅ Connection recovered (data flowing again)")
+                self.connection_warnings = 0
+
+    def _auto_stop(self, time):
+        """Auto-stop the strategy after duration."""
+        self.log.info(f"Session duration reached ({self.config.run_duration_seconds}s), stopping...")
+        self.stop()
+
+    def on_stop(self):
+        """
+        Cleanup and final data save on strategy stop.
+        """
+        # Save remaining data
+        self._save_all_data()
+
+        # Generate session metadata
+        self._save_session_metadata()
+
+        # Generate checksums
+        self._generate_checksums()
+
+        # Final stats
+        duration = time.time() - self.session_start_time
+        self.log.info(f"Session complete: {self.run_id}")
+        self.log.info(f"Duration: {duration:.1f} seconds")
+        self.log.info(f"Total quotes: {self.quote_count}")
+        self.log.info(f"Total trades: {self.trade_count}")
+        self.log.info(f"Total deltas: {self.delta_count}")
+        self.log.info(f"Output: {self.output_path}")
+
+    def _save_session_metadata(self):
+        """Save session metadata to JSON."""
+        metadata = {
+            "run_id": self.run_id,
+            "session_start": self.session_start_time,
+            "session_end": time.time(),
+            "duration_seconds": time.time() - self.session_start_time,
+            "instruments": self.config.instrument_ids,
+            "quote_count": self.quote_count,
+            "trade_count": self.trade_count,
+            "delta_count": self.delta_count,
+            "config": {
+                "flush_interval_seconds": self.config.flush_interval_seconds,
+                "record_quotes": self.config.record_quotes,
+                "record_trades": self.config.record_trades,
+                "record_orderbook": self.config.record_orderbook,
+                "orderbook_depth": self.config.orderbook_depth,
+            }
+        }
+
+        metadata_path = self.output_path / "session_metadata.json"
+        with open(metadata_path, "w") as f:
+            json.dump(metadata, f, indent=2)
+
+        self.log.info(f"✅ Saved metadata: {metadata_path}")
+
+    def _generate_checksums(self):
+        """Generate SHA256 checksums for all parquet files."""
+        checksums = {}
+
+        for parquet_file in self.output_path.rglob("*.parquet"):
+            with open(parquet_file, "rb") as f:
+                sha256 = hashlib.sha256(f.read()).hexdigest()
+
+            rel_path = str(parquet_file.relative_to(self.output_path))
+            checksums[rel_path] = {
+                "sha256": sha256,
+                "size_bytes": parquet_file.stat().st_size,
+            }
+
+        checksum_path = self.output_path / "checksums.json"
+        with open(checksum_path, "w") as f:
+            json.dump(checksums, f, indent=2)
+
+        self.log.info(f"✅ Generated checksums: {checksum_path}")

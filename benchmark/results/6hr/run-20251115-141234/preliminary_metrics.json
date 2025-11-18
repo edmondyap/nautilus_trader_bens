@@ -1,0 +1,37 @@
+{
+  "execution_status": "FAILED",
+  "failure_reason": "Data format incompatibility - ParquetDataCatalog cannot load data",
+  "total_pnl": null,
+  "total_pnl_pct": null,
+  "total_trades": 0,
+  "buy_fills": 0,
+  "sell_fills": 0,
+  "final_balance_usdt": 5000.0,
+  "final_balance_sol": 0.0,
+  "backtest_duration_seconds": null,
+  "data_start_time": "2025-11-09T16:08:01Z",
+  "data_end_time": "2025-11-09T22:08:01Z",
+  "data_duration_hours": 6.0,
+  "errors_encountered": [
+    "ValueError: 'data' collection was empty",
+    "ParquetDataCatalog.order_book_deltas() returned 0 records despite 7.1M rows in parquet file",
+    "ParquetDataCatalog.trade_ticks() returned 0 records despite 291K rows in parquet file",
+    "Data format mismatch: Parquet files contain raw CSV-like data, not Nautilus native objects"
+  ],
+  "data_validation": {
+    "parquet_files_exist": true,
+    "order_book_deltas_file_size_mb": 42,
+    "order_book_deltas_rows": 7114080,
+    "trade_ticks_file_size_mb": 11,
+    "trade_ticks_rows": 291552,
+    "quote_ticks_file_size_mb": 2,
+    "instruments_in_data": [
+      "SOLUSDT-LINEAR.BYBIT",
+      "SOLUSD-INVERSE.BYBIT"
+    ],
+    "catalog_can_load_data": false,
+    "manual_parquet_readable": true
+  },
+  "root_cause": "The data recording script saved data in CSV-like parquet format instead of Nautilus native format. The ParquetDataCatalog expects Nautilus-serialized objects (OrderBookDelta, TradeTick) but found simple columnar data (action, price, side, size, timestamp).",
+  "resolution_required": "Either: (1) Use Nautilus native data recording API, or (2) Convert existing parquet files to Nautilus format, or (3) Modify backtest script to load raw parquet data directly"
+}
