@@ -33,7 +33,7 @@ use crate::{
 #[pymethods]
 impl BybitHttpClient {
     #[new]
-    #[pyo3(signature = (api_key=None, api_secret=None, base_url=None, demo=false, testnet=false, timeout_secs=None, max_retries=None, retry_delay_ms=None, retry_delay_max_ms=None, recv_window_ms=None, proxy_url=None))]
+    #[pyo3(signature = (api_key=None, api_secret=None, base_url=None, demo=false, testnet=false, timeout_secs=None, max_retries=None, retry_delay_ms=None, retry_delay_max_ms=None, recv_window_ms=None, proxy_url=None, use_env_fallback=true))]
     #[allow(clippy::too_many_arguments)]
     fn py_new(
         api_key: Option<String>,
@@ -47,6 +47,7 @@ impl BybitHttpClient {
         retry_delay_max_ms: Option<u64>,
         recv_window_ms: Option<u64>,
         proxy_url: Option<String>,
+        use_env_fallback: bool,
     ) -> PyResult<Self> {
         let timeout = timeout_secs.or(Some(60));
 
@@ -60,8 +61,17 @@ impl BybitHttpClient {
             ("BYBIT_API_KEY", "BYBIT_API_SECRET")
         };
 
-        let key = api_key.or_else(|| std::env::var(api_key_env).ok());
-        let secret = api_secret.or_else(|| std::env::var(api_secret_env).ok());
+        let key = if use_env_fallback {
+            api_key.or_else(|| std::env::var(api_key_env).ok())
+        } else {
+            api_key
+        };
+
+        let secret = if use_env_fallback {
+            api_secret.or_else(|| std::env::var(api_secret_env).ok())
+        } else {
+            api_secret
+        };
 
         if let (Some(k), Some(s)) = (key, secret) {
             Self::with_credentials(
@@ -110,10 +120,10 @@ impl BybitHttpClient {
         self.credential().map(|c| c.masked_api_key())
     }
 
-    #[pyo3(name = "add_instrument")]
-    fn py_add_instrument(&self, py: Python, instrument: Py<PyAny>) -> PyResult<()> {
+    #[pyo3(name = "cache_instrument")]
+    fn py_cache_instrument(&self, py: Python, instrument: Py<PyAny>) -> PyResult<()> {
         let inst_any = pyobject_to_instrument_any(py, instrument)?;
-        self.add_instrument(inst_any);
+        self.cache_instrument(inst_any);
         Ok(())
     }
 

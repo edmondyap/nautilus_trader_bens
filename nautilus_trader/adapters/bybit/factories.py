@@ -45,14 +45,16 @@ def get_cached_bybit_http_client(
     retry_delay_max_ms: int | None = None,
     recv_window_ms: int | None = None,
     proxy_url: str | None = None,
+    use_env_fallback: bool = True,
 ) -> nautilus_pyo3.BybitHttpClient:
     """
     Cache and return a Bybit HTTP client with the given key and secret.
 
-    If ``api_key`` and ``api_secret`` are ``None``, then they will be sourced from the
-    environment variables ``BYBIT_API_KEY`` and ``BYBIT_API_SECRET`` for production,
-    ``BYBIT_DEMO_API_KEY`` and ``BYBIT_DEMO_API_SECRET`` when ``demo=True``,
-    or ``BYBIT_TESTNET_API_KEY`` and ``BYBIT_TESTNET_API_SECRET`` when ``testnet=True``.
+    If ``api_key`` and ``api_secret`` are ``None`` AND ``use_env_fallback=True``,
+    then they will be sourced from the environment variables ``BYBIT_API_KEY`` and
+    ``BYBIT_API_SECRET`` for production, ``BYBIT_DEMO_API_KEY`` and ``BYBIT_DEMO_API_SECRET``
+    when ``demo=True``, or ``BYBIT_TESTNET_API_KEY`` and ``BYBIT_TESTNET_API_SECRET`` when
+    ``testnet=True``.
 
     If a cached client with matching parameters already exists, the cached client will be returned.
 
@@ -80,6 +82,9 @@ def get_cached_bybit_http_client(
         The receive window (milliseconds) for Bybit HTTP requests.
     proxy_url : str, optional
         The proxy URL for HTTP requests.
+    use_env_fallback : bool, default True
+        Whether to fallback to environment variables for credentials.
+        Set to False for public-only mode (disables env var lookup).
 
     Returns
     -------
@@ -108,6 +113,7 @@ def get_cached_bybit_http_client(
         retry_delay_max_ms=retry_delay_max_ms,
         recv_window_ms=recv_window_ms,
         proxy_url=proxy_url,
+        use_env_fallback=use_env_fallback,
     )
 
 
@@ -193,6 +199,7 @@ class BybitLiveDataClientFactory(LiveDataClientFactory):
             retry_delay_max_ms=config.retry_delay_max_ms,
             recv_window_ms=config.recv_window_ms,
             proxy_url=config.http_proxy_url,
+            use_env_fallback=config.use_env_fallback,
         )
         provider = get_cached_bybit_instrument_provider(
             client=client,
