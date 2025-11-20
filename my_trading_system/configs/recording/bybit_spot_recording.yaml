@@ -1,0 +1,38 @@
+# Nautilus Trader Data Recorder Configuration
+# Single-symbol SPOT recording (quotes only)
+
+trader_id: "DATA-RECORDER-001"
+
+strategy:
+  # Instruments to record (must include .BYBIT venue)
+  instruments:
+    - "SOLUSDT-SPOT.BYBIT"
+
+  # Output directory for parquet files
+  output_dir: "data/recordings"
+
+  # Flush interval (write to parquet every N seconds)
+  flush_interval_seconds: 60
+
+  # Data types to record
+  record_quotes: true
+  record_orderbook: false
+
+  # Order book depth (if record_orderbook=true)
+  orderbook_depth: 50
+
+  # Connection monitoring
+  connection_timeout_seconds: 120
+
+  # Session duration (seconds, null = run forever)
+  # Example: 300 for 5 minutes, 600 for 10 minutes
+  run_duration_seconds: null
+
+bybit:
+  # API credentials (not required for public data)
+  # Leave null for public market data recording
+  api_key: null
+  api_secret: null
+
+  # Use testnet (false = live data)
+  testnet: false

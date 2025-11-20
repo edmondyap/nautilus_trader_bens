@@ -1,0 +1,33 @@
+# API Keys Configuration Template
+#
+# ⚠️ IMPORTANT:
+# 1. Copy this file to api_keys.yaml
+# 2. Fill in your actual API keys
+# 3. NEVER commit api_keys.yaml to git (it's in .gitignore)
+#
+# Usage:
+#   cp api_keys.yaml.example api_keys.yaml
+#   # Then edit api_keys.yaml with your real keys
+
+# News APIs
+newsapi_key: "your_newsapi_key_here"  # Get from: https://newsapi.org/
+
+# Twitter/X API
+twitter_bearer_token: "your_twitter_bearer_token_here"  # Get from: https://developer.twitter.com/
+
+# Reddit API
+reddit_client_id: "your_reddit_client_id_here"
+reddit_client_secret: "your_reddit_client_secret_here"
+reddit_user_agent: "your_app_name/1.0"  # Get from: https://www.reddit.com/prefs/apps
+
+# Exchange APIs (for live trading)
+# Binance
+binance_api_key: "your_binance_api_key_here"
+binance_api_secret: "your_binance_api_secret_here"
+
+# Bybit
+bybit_api_key: "your_bybit_api_key_here"
+bybit_api_secret: "your_bybit_api_secret_here"
+
+# Other APIs
+# Add your other API keys here as needed

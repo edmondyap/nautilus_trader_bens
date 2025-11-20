@@ -1,0 +1,43 @@
+# Example Strategy Configuration
+# Copy this file and modify for your own strategies
+
+metadata:
+  version: 1.0
+  created: 2024-11-19
+  description: "Example strategy configuration template"
+
+strategy:
+  class_name: EMACrossStrategy
+  instrument_id: BTCUSDT-PERP.BINANCE
+  bar_type: BTCUSDT-PERP.BINANCE-5-MINUTE-LAST-INTERNAL
+
+parameters:
+  # Strategy-specific parameters
+  fast_period: 10
+  slow_period: 20
+  trade_size: 0.1
+
+  # Optional parameters
+  stop_loss_pct: 0.02        # 2% stop loss
+  take_profit_pct: 0.04      # 4% take profit
+
+risk:
+  max_position_size: 1.0     # Maximum position size
+  max_daily_loss: 1000.0     # Maximum daily loss in USD
+  max_open_positions: 3      # Maximum number of open positions
+
+environment:
+  mode: backtest             # backtest, sandbox, or live
+  log_level: INFO            # DEBUG, INFO, WARNING, ERROR
+  starting_balance: 100000   # For backtesting
+
+# For backtesting
+backtest:
+  start_date: 2024-01-01
+  end_date: 2024-11-19
+  data_path: data/catalog
+
+# For live trading (optional)
+live:
+  venue: BINANCE
+  testnet: false

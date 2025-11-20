@@ -1,0 +1,36 @@
+# Nautilus Trader Data Recorder Configuration
+# SPOT recording with order book deltas
+
+trader_id: "DATA-RECORDER-001"
+
+strategy:
+  # Instruments to record
+  instruments:
+    - "SOLUSDT-SPOT.BYBIT"
+
+  # Output directory for parquet files
+  output_dir: "data/recordings"
+
+  # Flush interval (write to parquet every N seconds)
+  flush_interval_seconds: 60
+
+  # Data types to record
+  record_quotes: true
+  record_orderbook: true  # ← Order book enabled
+
+  # Order book depth
+  orderbook_depth: 50     # ← L2 depth (50 levels)
+
+  # Connection monitoring
+  connection_timeout_seconds: 120
+
+  # Session duration (6 hours = 21600 seconds)
+  run_duration_seconds: 21600
+
+bybit:
+  # API credentials (not required for public data)
+  api_key: null
+  api_secret: null
+
+  # Use testnet (false = live data)
+  testnet: false
