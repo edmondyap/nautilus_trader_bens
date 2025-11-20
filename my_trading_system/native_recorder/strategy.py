@@ -348,6 +348,9 @@ class NativeDataRecorderStrategy(Strategy):
                 "price": float(delta.order.price),
                 "size": float(delta.order.size),
                 "order_id": delta.order.order_id,
+                "sequence": delta.sequence,
+                "flags": delta.flags,
+                "ts_init": delta.ts_init,
             })
 
     def _periodic_flush(self, time):
